@@ -160,9 +160,9 @@ A valid Megabytes coinbase may include:
 
 ```text
 vout[0]  Block reward
-vout[1]  OP_RETURN "MHIS"
-vout[2]  OP_RETURN "DAGP"
-vout[3]  OP_RETURN SegWit commitment
+vout[n]   OP_RETURN "MHIS"           (Megabytes consensus)
+vout[n+1] OP_RETURN "DAGP"           (Megabytes consensus)
+vout[n+2] OP_RETURN 0xaa21a9ed[...]  (SegWit commitment, BIP141)
 ```
 
 These outputs **must remain unchanged**.
