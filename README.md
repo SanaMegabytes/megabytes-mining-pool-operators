@@ -1,4 +1,4 @@
-# Megabytes – Mining Pool Operators Guide
+# Megabytes – mining pool operators guide
 
 This document describes how to operate a mining pool for **Megabytes**, a multi-algorithm blockchain using a **BlockDAG consensus** with **DAGP** and **MHIS** commitments embedded in the coinbase transaction.
 
@@ -6,8 +6,6 @@ This guide is intended for **pool administrators, stratum operators, and infrast
 
 Blocks mined through the reference Stratum implementation were validated to correctly preserve DAG parent commitments (DAGP), SegWit commitments, and MNS registrations embedded in the coinbase transaction.  
 The pool does not compute or alter DAG data and relies entirely on daemon-provided block templates.
-
----
 
 ## 1. Overview
 
@@ -310,7 +308,7 @@ A valid pooled block will:
 
 ## 14. Reference Implementation
 
-The project provides a reference Stratum implementation (`stratum_simple.cpp`) demonstrating:
+The project provides a reference Stratum implementation (`megabytes_stratum.cpp`) demonstrating:
 
 - Multi-algorithm support
 - DAG-safe coinbase handling
