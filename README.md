@@ -4,9 +4,8 @@ This document describes how to operate a mining pool for **Megabytes**, a multi-
 
 This guide is intended for **pool administrators, stratum operators, and infrastructure maintainers**.
 
-Blocks mined through the reference Stratum implementation were validated to correctly preserve DAG parent commitments (DAGP), SegWit commitments, and MNS registrations embedded in the coinbase transaction. 
+Blocks mined through the reference Stratum implementation were validated to correctly preserve DAG parent commitments (DAGP), SegWit commitments, and MNS registrations embedded in the coinbase transaction.  
 The pool does not compute or alter DAG data and relies entirely on daemon-provided block templates.
-FILE : megabytes_stratum.cpp 
 
 ---
 
@@ -16,12 +15,12 @@ Megabytes differs from traditional linear blockchains in several important ways:
 
 - **BlockDAG consensus**: blocks reference multiple parents instead of a single previous block
 - **Multi-algorithm mining**: a single daemon can mine and validate multiple PoW algorithms
-- **Consensus commitments in coinbase**:
+- **Consensus commitments embedded in the coinbase**:
   - `DAGP` (DAG Parents)
   - `MHIS` (Merkle History Integrity Summary)
   - SegWit commitment
 
-Because of this, **the pool must not modify block templates provided by the daemon**, except for extranonce insertion.
+Because of this architecture, **mining pools must not modify block templates provided by the daemon**, except for extranonce insertion.
 
 ---
 
@@ -37,53 +36,129 @@ Mining Pool / Stratum
 Miners
 ```
 
-Key rule:
+**Key principle**
 
-> **The daemon is the authority for DAG selection and block structure.  
-> The pool is a transport and validation layer, not a DAG decision engine.**
+> The daemon is the authority for DAG selection and block structure.  
+> The pool acts as a transport, coordination, and submission layer — **not a DAG decision engine**.
 
 ---
 
-## 3. Block Templates and DAG Responsibility
+## 3. Coinbase Construction (Mandatory)
 
-### 3.1 Selected Parent and DAG Parents
+Megabytes **requires mining pools to use the coinbase transaction provided by the daemon**
+via `getblocktemplate.coinbasetxn.data`.
+
+This is **not optional**.
+
+The daemon-generated coinbase already contains:
+- DAGP commitments (DAG parents)
+- MHIS commitments
+- SegWit structure
+- Consensus-critical output ordering
+
+Pool software **must NOT rebuild the coinbase manually**.
+
+---
+
+### 3.1 Mandatory Rules
+
+1. Always use `coinbasetxn.data` from `getblocktemplate`
+2. Only modify the **scriptSig of `vin[0]`** to insert extranonce
+3. Never alter outputs, OP_RETURN entries, or witness data
+4. Fail hard if `coinbasetxn.data` is missing
+5. Ensure extranonce insertion does not corrupt DAGP or MHIS payloads
+
+---
+
+### 3.2 Reference Implementation (Extranonce Handling)
+
+The following excerpt shows a **reference-safe method** to split the coinbase into
+`coinb1` and `coinb2` using a **unique placeholder pattern**.
+
+This example is provided for clarity and validation purposes.
+
+```cpp
+static StratumCoinbaseTemplate BuildStratumCoinbaseTemplate(
+    const json& gbt,
+    const std::string& extranonce1_hex,
+    int extranonce2_size)
+{
+    const int ex1_bytes = (int)extranonce1_hex.size() / 2;
+    const int ex2_bytes = extranonce2_size;
+    const int extra_bytes = ex1_bytes + ex2_bytes;
+
+    static const uint8_t kPat[] = {0xFA, 0xBF, 0xFA, 0xBF, 0xFA, 0xBF, 0xFA, 0xBF};
+    std::vector<unsigned char> extra_placeholder;
+    for (int i = 0; i < extra_bytes; ++i)
+        extra_placeholder.push_back(kPat[i % sizeof(kPat)]);
+
+    if (!gbt.contains("coinbasetxn") || !gbt["coinbasetxn"].contains("data"))
+        throw std::runtime_error("coinbasetxn.data is required");
+
+    CMutableTransaction mtx;
+    CDataStream ss(ParseHex(gbt["coinbasetxn"]["data"]), SER_NETWORK, PROTOCOL_VERSION);
+    ss >> mtx;
+
+    mtx.vin[0].scriptSig << extra_placeholder;
+
+    CDataStream ss2(SER_NETWORK, PROTOCOL_VERSION);
+    ss2 << mtx;
+
+    std::vector<uint8_t> raw(ss2.begin(), ss2.end());
+
+    auto it = std::search(raw.begin(), raw.end(),
+                          extra_placeholder.begin(), extra_placeholder.end());
+    if (it == raw.end())
+        throw std::runtime_error("extranonce placeholder not found");
+
+    size_t start = std::distance(raw.begin(), it);
+    size_t end   = start + extra_bytes;
+
+    return {
+        BytesToHex({raw.begin(), raw.begin() + start}),
+        BytesToHex({raw.begin() + end, raw.end()})
+    };
+}
+```
+
+---
+
+### 3.3 Why This Matters
+
+Incorrect coinbase handling may result in:
+- Missing DAG parents
+- Invalid MHIS commitments
+- Silent consensus rejection
+- Blocks accepted by miners but rejected by the network
+
+If in doubt: **do not modify the coinbase**.
+
+---
+
+## 4. DAG Responsibility and Block Templates
+
+### 4.1 DAG Parents and Selected Parent
 
 In Megabytes:
-- There is no single “best chain” in the classical sense
+- There is no single linear “best chain”
 - Each block commits to a **set of DAG parents**
 - The daemon selects:
-  - the **selected parent**
-  - the **DAG parents list**
-  - the **blue/red classification**
+  - the selected parent
+  - the DAG parent list
+  - blue / red classification
 
 **Pool operators MUST NOT:**
 - Compute DAG parents
 - Reorder DAG parents
 - Replace or remove DAG commitments
 
-All DAG data is already included in the daemon-provided coinbase transaction.
+All DAG data is already embedded in the daemon-provided coinbase.
 
 ---
 
-## 4. Coinbase Transaction Requirements
-
-### 4.1 Mandatory Rule
-
-The pool **MUST use `coinbasetxn.data` exactly as provided by the daemon**.
-
-The only allowed modification is:
-- inserting extranonce bytes into `vin[0].scriptSig`
-
-### 4.2 Coinbase Outputs
+## 5. Coinbase Transaction Structure (Informational)
 
 A valid Megabytes coinbase may include:
-
-- Block reward output
-- `OP_RETURN` with **MHIS** commitment
-- `OP_RETURN` with **DAGP** commitment
-- SegWit commitment output
-
-Example structure:
 
 ```text
 vout[0]  Block reward
@@ -96,7 +171,7 @@ These outputs **must remain unchanged**.
 
 ---
 
-## 5. DAGP Commitment Format (Informational)
+## 6. DAGP Commitment Format (Informational)
 
 The DAG parents commitment uses an `OP_RETURN` payload:
 
@@ -106,39 +181,39 @@ The DAG parents commitment uses an `OP_RETURN` payload:
 
 - `parent_count` is typically 8
 - Each parent hash is 32 bytes
-- The pool does not parse or validate this payload
-- The daemon validates it during block acceptance
+- Pools do not parse or validate this payload
+- Validation is performed by the daemon
 
 ---
 
-## 6. MHIS Commitment (Informational)
+## 7. MHIS Commitment (Informational)
 
-The MHIS commitment is also embedded in the coinbase via `OP_RETURN`.
+MHIS is embedded in the coinbase via `OP_RETURN`.
 
-It cryptographically commits to historical chain data and is used by the consensus engine.
+It cryptographically commits to historical DAG state and is validated by consensus.
 
 **Pools must preserve it unchanged.**
 
 ---
 
-## 7. Multi-Algorithm Mining
+## 8. Multi-Algorithm Mining
 
 Megabytes supports multiple PoW algorithms (e.g. Groestl, KAWPOW).
 
-### 7.1 Single Daemon, Multiple Algorithms
+### 8.1 Single Daemon Model
 
-A single Megabytes daemon can:
-- Provide templates for different algorithms
+A single daemon can:
+- Serve templates for different algorithms
 - Accept blocks mined with different algorithms
-- Mix algorithms safely in the same DAG
+- Safely mix algorithms in the same DAG
 
-The pool **does not need multiple daemons**.
+Pools **do not need multiple daemons**.
 
 ---
 
-### 7.2 Algorithm Selection
+### 8.2 Algorithm Selection
 
-Algorithm selection happens via:
+Algorithm selection may occur via:
 - `getblocktemplate` parameters
 - Miner password hints (classic stratum)
 - Protocol-specific stratum (e.g. KAWPOW / RVN-style)
@@ -147,75 +222,72 @@ The daemon remains authoritative.
 
 ---
 
-## 8. Stratum Job Handling
+## 9. Stratum Job Handling
 
-### 8.1 Job Refresh Policy
+### 9.1 Job Refresh Policy
 
 Pools SHOULD refresh jobs when:
 - A new block is received
-- A new template is available
+- A new template becomes available
 - `clean_jobs = true` is required
 
-Unlike linear chains, **DAG tips may change without height increasing**, so frequent refresh is recommended.
+Because DAG tips may change without height increasing, **frequent refresh is recommended**.
 
 ---
 
-### 8.2 Shares vs Blocks
+### 9.2 Shares vs Blocks
 
 - Shares are validated normally
 - A valid share does not guarantee a valid block
-- The daemon performs final DAG validation
+- Final DAG validation is performed by the daemon
 
-Pools may safely:
-- Accept shares optimistically
-- Submit full blocks only when PoW target is met
+Pools may accept shares optimistically and submit full blocks only when the PoW target is met.
 
 ---
 
-## 9. KAWPOW-Specific Notes
+## 10. KAWPOW-Specific Notes
 
 For KAWPOW mining:
-
 - The block header includes the block height
-- `nonce64` and `mix_hash` must be serialized exactly as expected
+- `nonce64` and `mix_hash` must be serialized exactly
 - The daemon verifies the full KAWPOW proof
 
 Pools must submit:
-- Full serialized block
-- Correct `mix_hash`
-- Correct `nonce64`
+- The full serialized block
+- The correct `mix_hash`
+- The correct `nonce64`
 
 ---
 
-## 10. Common Mistakes (DO NOT DO THIS)
+## 11. Common Mistakes (Do Not Do This)
 
 ❌ Rebuilding the coinbase manually  
 ❌ Removing OP_RETURN outputs  
-❌ Combining DAGP and MHIS into one output  
+❌ Combining DAGP and MHIS into a single output  
 ❌ Computing DAG parents in the pool  
 ❌ Using stale templates for long periods  
 ❌ Modifying coinbase outputs for “optimization”
 
-All of the above will lead to **invalid or sub-optimal blocks**.
+All of the above lead to **invalid or sub-optimal blocks**.
 
 ---
 
-## 11. Recommended Pool Checklist
+## 12. Recommended Pool Checklist
 
-Before running on mainnet, verify:
+Before running on mainnet:
 
 - [ ] `coinbasetxn.data` is used verbatim
-- [ ] Only `scriptSig` is modified for extranonce
+- [ ] Only `scriptSig` is modified
 - [ ] DAGP and MHIS outputs are preserved
-- [ ] Jobs refresh correctly on new templates
-- [ ] Multiple algorithms are supported correctly
-- [ ] Blocks are validated with `getblockdag`
+- [ ] Jobs refresh correctly
+- [ ] Multiple algorithms are handled correctly
+- [ ] Blocks are validated using DAG RPCs
 
 ---
 
-## 12. Validation Commands (Daemon)
+## 13. Validation Commands
 
-Pool operators can verify mined blocks using:
+Pool operators can validate mined blocks using:
 
 ```bash
 megabytes-cli getblock <blockhash> 2
@@ -236,30 +308,24 @@ A valid pooled block will:
 
 ---
 
-## 13. Reference Implementation
+## 14. Reference Implementation
 
-The project provides a **reference stratum implementation** (`stratum_simple.cpp`) demonstrating:
+The project provides a reference Stratum implementation (`stratum_simple.cpp`) demonstrating:
 
 - Multi-algorithm support
-- Correct coinbase handling
-- DAG-safe block submission
-- KAWPOW and classic stratum compatibility
-
-Pool operators may adapt this code for production use.
+- DAG-safe coinbase handling
+- Correct block submission
+- Classic and KAWPOW stratum compatibility
 
 ---
 
-## 14. Final Notes
+## 15. Final Notes
 
 Megabytes is designed so that **existing pool software can be adapted with minimal changes**, provided that the daemon-provided block template is respected.
 
-If in doubt:
-
-> **Do not modify what the daemon gives you.**
+> If in doubt: **do not modify what the daemon gives you**.
 
 This guarantees correctness across DAG, MHIS, and future consensus upgrades.
-
-
 
 
 
