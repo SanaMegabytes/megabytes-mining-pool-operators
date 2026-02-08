@@ -152,6 +152,10 @@ In Megabytes:
 
 All DAG data is already embedded in the daemon-provided coinbase.
 
+> If a miner modifies DAG parents in any way, the block becomes invalid or non-competitive.
+> DAG parent selection is exclusively performed by the daemon.
+> The coinbase commitment is authoritative and immutable.
+
 ---
 
 ## 5. Coinbase Transaction Structure (Informational)
